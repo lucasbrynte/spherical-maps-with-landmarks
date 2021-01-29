@@ -16,6 +16,8 @@ void Harmonic::star_map() {
 	}
 }
 
+// e_k(edge) holds cotangent weight.
+// edgeVertex1 & edgeVertex2 are edge end points
 double Harmonic::compute_energy(int type) {
 	double energy = 0;
 	for (SolidEdgeIterator eiter(_nmesh); !eiter.end(); ++eiter) {
@@ -26,39 +28,61 @@ double Harmonic::compute_energy(int type) {
 		if (type == HARMONIC) {
 			energy += e_k(edge) * uv.norm2();
 		}
+		// Point.norm2() is squared 2-norm
 		else energy += uv.norm2();
 	}
 	return energy;
 }
 
 void Harmonic::compute_gradient(int type) {
+	// Loop over all vertices sv in mesh
 	for (SolidVertexIterator viter(_nmesh); !viter.end(); ++viter) {
 		Solid::tVertex sv = *viter;
+		// Initialize gradient at sv
 		Point gradient = Point(0, 0, 0);
+		// Loop over all vertices tv connected with sv
 		for (VertexVertexIterator vviter(sv); !vviter.end(); ++vviter) {
 			Vertex * tv = *vviter;
+			// Gradient computation depends on whether type is HARMONIC or TUETTE:
+			// Actually, gradient might be missing a factor 2, given that the cost is ||v1-v2||^2
 			if (type == HARMONIC)
 				gradient += (sv->point() - tv->point()) * e_k(_nmesh->vertexEdge(sv, tv));
 			else gradient += (sv->point() - tv->point());
 		}
+		// v_dv stores the raw gradient at sv
 		v_dv(sv) = gradient;
+		// v_abdv stores only the tangential component, since projection onto normal is subtracted
 		v_abdv(sv) = v_dv(sv) - v_n(sv) * (v_dv(sv) * v_n(sv));
 	}
 }
 
 void Harmonic::conjugate_gradient() {
+	// ---------------
+	// Conclusion: Some doubts about this "conjugate" part, and what it does,
+	// but hopefully everything will work out if just modifying compute_gradient.
+	// ---------------
+
+	// v_abdv holds tangential component of gradient
+	// both v_fabdv AND v_s appear to have been set equal to v_abdv before conjugate gradient loop starts..? Shared value or ref..?
+	// Consequently (if shared ref), v_beta might simply be 1, and v_s=0..?
+	// v_s redefined to v_s = v_s*v_beta - v_abdv, i.e. incldues both old v_s (weighted), and the negative gradient.
+	// In the end, v_s seems to be the direction for vertex update
 	for (SolidVertexIterator viter(_nmesh); !viter.end(); ++viter) {
 		Solid::tVertex vertex = *viter;
+		// operator* is dot product, so v_beta(vertex) is set to a squared ratio of vector norms:
 		v_beta(vertex) = v_abdv(vertex)*v_abdv(vertex) / (v_fabdv(vertex)*v_fabdv(vertex));
 		v_s(vertex) = v_s(vertex)*v_beta(vertex) - v_abdv(vertex);
 	}
 	double alpha = 1e-6;
 	double e0 = compute_energy(HARMONIC);
+	// Initialize v_mp to prev value
 	for (SolidVertexIterator viter(_nmesh); !viter.end(); ++viter) {
 		Solid::tVertex v = *viter;
 		v_mp(v) = v->point();
 	}
+	// Alpha starts small, and is gradually increased, until > 1e-2.
 	while (alpha<1e-2) {
+		// Perturb the vertices in v_s direction, with step size alpha
 		for (SolidVertexIterator viter(_nmesh); !viter.end(); ++viter) {
 			Solid::tVertex v = *viter;
 			v->point() = v->point() + v_s(v)*alpha;
@@ -66,6 +90,7 @@ void Harmonic::conjugate_gradient() {
 		}
 		double nenergy = compute_energy(HARMONIC);
 		if (nenergy < e0) {
+			// Whenever energy is lower than initial energy, store the value to v_mp. Otherwise, reject.
 			for (SolidVertexIterator viter(_nmesh); !viter.end(); ++viter) {
 				Solid::tVertex v = *viter;
 				v_mp(v) = v->point();
@@ -73,6 +98,7 @@ void Harmonic::conjugate_gradient() {
 		}
 		alpha *= 2;
 	}
+	// v_mp is the final value of the vertex after this conjugate gradient iteration
 	for (SolidVertexIterator viter(_nmesh); !viter.end(); ++viter) {
 		Solid::tVertex v = *viter;
 		v->point() = v_mp(v);
@@ -87,7 +113,9 @@ void Harmonic::update_mesh() {
 	}
 }
 
+// Should this be interpreted as an approximate clip operation, in order to fulfill a constraint for sphere being centered at mass center?
 void Harmonic::update_mass_center() {
+	// Compute per-face areas
 	for (SolidFaceIterator fiter(_nmesh); !fiter.end(); ++fiter) {
 		Solid::tFace face = *fiter;
 
@@ -101,6 +129,7 @@ void Harmonic::update_mass_center() {
 		Point n = (p[1] - p[0]) ^ (p[2] - p[0]);
 		f_a(face) = n.norm() / 2.0;
 	}
+	// Compute per-vertex areas (1/3 of surrounding faces)
 	for (SolidVertexIterator viter(_nmesh); !viter.end(); ++viter) {
 		Vertex * vertex = *viter;
 		double area = 0;
@@ -111,6 +140,7 @@ void Harmonic::update_mass_center() {
 		v_a(vertex) = area / 3.0;
 	}
 
+	// Increment area-weighted vertex average, and the sum of weights
 	Point center(0, 0, 0);
 	double mass = 0;
 	for (SolidVertexIterator viter(_nmesh); !viter.end(); ++viter) {
@@ -118,11 +148,15 @@ void Harmonic::update_mass_center() {
 		center += vertex->point() * v_a(vertex);
 		mass += v_a(vertex);
 	}
+	// Compute the area-weighted vertex average
 	center /= mass;
 
+	// Loop over vertices
 	for (SolidVertexIterator viter(_nmesh); !viter.end(); ++viter) {
 		Vertex * vertex = *viter;
+		// Translate mass-center to origin
 		vertex->point() -= center;
+		// Renormalize points
 		vertex->point() /= vertex->point().norm();
 	}
 }
@@ -201,12 +235,15 @@ void Harmonic::set_up_normal() {
 }
 
 void Harmonic::set_up_kuv() {
+	// Initialize "Edge Trait"
+	// Dummy initialization of edge weights
 	for (SolidEdgeIterator eiter(_nmesh); !eiter.end(); ++eiter) {
 		Solid::tEdge edge = *eiter;
 		edge->trait() = new CEdgeTrait;
 		e_k(edge) = 1.0;
 	}
 
+	// Compute and store cotangent weights
 	double sum = 0;
 	for (SolidEdgeIterator eiter(_nmesh); !eiter.end(); ++eiter) {
 		Solid::tEdge edge = *eiter;
